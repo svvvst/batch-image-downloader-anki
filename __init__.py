@@ -139,6 +139,8 @@ def getImages(nid, fld, html, img_width, img_height, img_count, fld_overwrite):
             cnt += 1
             if cnt == img_count:
                 break
+        except requests.packages.urllib3.exceptions.LocationParseError: # fix from anonymous @ https://ankiweb.net/shared/info/561924305
+            pass
         except requests.exceptions.RequestException:
             pass
         except UnidentifiedImageError:
