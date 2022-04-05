@@ -28,6 +28,11 @@ from distutils.spawn import find_executable
 
 from .designer.main import Ui_Dialog
 
+from aqt.operations import CollectionOp
+from aqt.progress import ProgressManager
+from aqt.taskman import TaskManager
+
+
 # https://github.com/glutanimate/html-cleaner/blob/master/html_cleaner/main.py#L59
 sys.path.append(os.path.join(os.path.dirname(__file__), "vendor"))
 
@@ -42,8 +47,194 @@ headers = {
   "User-Agent": "Mozilla/5.0 (Windows NT 6.1; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/70.0.3538.67 Safari/537.36"
 }
 
+def updateField(mw, config, nid, fld, images, overwrite):
+    if not images:
+        return
+    imgs = []
+    for fname, data in images:
+        fname = mw.col.media.writeData(fname, data)
+        filename = '<img src="%s">' % fname
+        imgs.append(filename)
+    note = mw.col.getNote(nid)
+    delimiter = config.get("Delimiter", " ")
+    if overwrite == "Append":
+        if note[fld]:
+            note[fld] += delimiter
+        note[fld] += delimiter.join(imgs)
+    else:
+        note[fld] = delimiter.join(imgs)
+    note.flush()
 
-def updateNotes(browser, nids):
+def getImages(nid, fld, html, img_width, img_height, img_count, fld_overwrite):
+    from PIL import Image, ImageSequence, UnidentifiedImageError
+
+    soup = BeautifulSoup(html, "html.parser")
+    rg_meta = soup.find_all("div", {"class": "rg_meta"})
+    metadata = [json.loads(e.text) for e in rg_meta]
+    results = [d["ou"] for d in metadata]
+
+    if not results:
+        regex = re.escape("AF_initDataCallback({")
+        regex += r'[^<]*?data:[^<]*?' + r'(\[[^<]+\])'
+
+        for txt in re.findall(regex, html):
+            data = json.loads(txt)
+
+            try:
+                for d in data[31][0][12][2]:
+                    try:
+                        results.append(d[1][3][0])
+                    except Exception as e:
+                        pass
+            except Exception as e:
+                pass
+
+    cnt = 0
+    images = []
+    for url in results:
+        try:
+            r = requests.get(url, headers=headers, timeout=15)
+            r.raise_for_status()
+            data = r.content
+            if 'text/html' in r.headers.get('content-type', ''):
+                continue
+            if 'image/svg+xml' in r.headers.get('content-type', ''):
+                continue
+            url = re.sub(r"\?.*?$", "", url)
+            path = urllib.parse.unquote(url)
+            fname = os.path.basename(path)
+            if not fname:
+                fname = checksum(data)
+            im = Image.open(io.BytesIO(data))
+            if img_width > 0 or img_height > 0:
+                width, height = im.width, im.height
+                if img_width > 0:
+                    width = min(width, img_width)
+                if img_height > 0:
+                    height = min(height, img_height)
+                buf = io.BytesIO()
+                if getattr(im, 'n_frames', 1) == 1:
+                    im.thumbnail((width, height))
+                    im.save(buf, format=im.format, optimize=True)
+                elif mpv_executable:
+                    thread_id = threading.get_native_id()
+                    tmp_path = tmpfile(suffix='.{}'.format(thread_id))
+                    with open(tmp_path, 'wb') as f:
+                        f.write(data)
+                    img_fmt = im.format.lower()
+                    img_ext = '.' + img_fmt
+                    img_path = tmpfile(suffix=img_ext)
+                    cmd = [mpv_executable, tmp_path, "-vf", "lavfi=[scale='min({},iw)':'min({},ih)':force_original_aspect_ratio=decrease:flags=lanczos]".format(img_width, img_height), "-o", img_path]
+                    with noBundledLibs():
+                        p = subprocess.Popen(cmd, startupinfo=si, stdin=subprocess.PIPE,
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                            env=env)
+                    if p.wait() == 0:
+                        with open(img_path, 'rb') as f:
+                            buf.write(f.read())
+                else:
+                    buf = io.BytesIO(data)
+                data = buf.getvalue()
+            images.append((fname, data))
+            cnt += 1
+            if cnt == img_count:
+                break
+        except requests.exceptions.RequestException:
+            pass
+        except UnidentifiedImageError:
+            pass
+        except UnicodeError as e:
+            # UnicodeError: encoding with 'idna' codec failed (UnicodeError: label empty or too long)
+            # https://bugs.python.org/issue32958
+            if str(e) != "encoding with 'idna' codec failed (UnicodeError: label empty or too long)":
+                raise
+    return (nid, fld, images, fld_overwrite)
+
+def updateNotes(browser, mw, nids, sf, sq, config):
+
+    # progress = ProgressManager(mw=mw)
+    # mw.taskman.run_on_main(lambda: progress.start(immediate=True,label='Processing notes...',max=1,min=0))
+
+    # mw.taskman.run_on_main(lambda mw=mw: progress = ProgressManager(mw=mw))
+
+    # showInfo('test')
+    browser.model.beginReset()
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        jobs = []
+        processed = set()
+        for c, nid in enumerate(nids, 1): 
+
+
+            note = mw.col.getNote(nid)
+
+            w = note[sf]
+
+            for q in sq:
+                df = q["Field"]
+
+                if not df:
+                    continue
+
+                if note[df] and q["Overwrite"] == "Skip":
+                    continue
+
+                w = re.sub(r'</?(b|i|u|strong|span)(?: [^>]+)>', '', w)
+                w = re.sub(r'\[sound:.*?\]', '', w)
+                if '<' in w:
+                    soup = BeautifulSoup(w, "html.parser")
+                    for s in soup.stripped_strings:
+                        w = s
+                        break
+                    else:
+                        w = re.sub(r'<br ?/?>[\s\S]+$', ' ', w)
+                        w = re.sub(r'<[^>]+>', '', w)
+
+                clozes = re.findall(r'{{c\d+::(.*?)(?::.*?)?}}', w)
+                if clozes:
+                    w = ' '.join(clozes)
+
+                query = q["URL"].replace("{}", w)
+
+                try:
+                    r = requests.get("https://www.google.com/search?tbm=isch&q={}&safe=active".format(query), headers=headers, timeout=15)
+                    r.raise_for_status()
+                    future = executor.submit(getImages, nid, df, r.text, q["Width"], q["Height"], q["Count"], q["Overwrite"])
+                    jobs.append(future)
+                except (requests.exceptions.ReadTimeout, requests.exceptions.ConnectionError) as e:
+                    pass
+
+            done, not_done = concurrent.futures.wait(jobs, timeout=0)
+            for future in done:
+                nid, fld, images, overwrite = future.result()
+                updateField(mw, config, nid, fld, images, overwrite)
+                processed.add(nid)
+                jobs.remove(future)
+            else:
+                # progress.finish()
+                # progress.start(immediate=True,label='Processing notes...',max=len(nids),min=len(processed))
+                # mw.taskman.run_on_main(lambda: progress.update(label='Processing notes...',max=len(nids),value=len(processed)))
+                label = str(len(processed)) + ' of ' + str(len(nids))
+                mw.taskman.run_on_main(lambda:mw.progress.update(label=label))
+                # label = str(len(processed)) + ' of ' + str(len(nids))
+                # tooltip(label)
+
+        for future in concurrent.futures.as_completed(jobs):
+            nid, fld, images, overwrite = future.result()
+            updateField(mw, config, nid, fld, images, overwrite)
+            processed.add(nid)
+            # progress.finish()
+            # progress.start(immediate=True,label='Processing notes...',max=len(nids),min=len(processed))
+            # mw.taskman.run_on_main(lambda: progress.update(label='Processing notes...',max=len(nids),value=len(processed)))
+            label = str(len(processed)) + ' of ' + str(len(nids))
+            mw.taskman.run_on_main(lambda:mw.progress.update(label=label))
+            # label = str(len(processed)) + ' of ' + str(len(nids))
+            # tooltip(label)
+
+    browser.model.endReset()
+    mw.requireReset()
+    # mw.progress.finish()
+
+def updateNotesUI(browser, nids):
     from PIL import Image, ImageSequence, UnidentifiedImageError
 
     mw = browser.mw
@@ -184,173 +375,14 @@ def updateNotes(browser, nids):
     config["Search Queries"] = sq
     mw.addonManager.writeConfig(__name__, config)
 
-    def updateField(nid, fld, images, overwrite):
-        if not images:
-            return
-        imgs = []
-        for fname, data in images:
-            fname = mw.col.media.writeData(fname, data)
-            filename = '<img src="%s">' % fname
-            imgs.append(filename)
-        note = mw.col.getNote(nid)
-        delimiter = config.get("Delimiter", " ")
-        if overwrite == "Append":
-            if note[fld]:
-                note[fld] += delimiter
-            note[fld] += delimiter.join(imgs)
-        else:
-            note[fld] = delimiter.join(imgs)
-        note.flush()
-
     mw.checkpoint("Add Google Images")
-    mw.progress.start(immediate=True)
-    browser.model.beginReset()
-    with concurrent.futures.ThreadPoolExecutor() as executor:
-        jobs = []
-        processed = set()
-        for c, nid in enumerate(nids, 1):
-            note = mw.col.getNote(nid)
 
-            w = note[sf]
-
-            for q in sq:
-                df = q["Field"]
-
-                if not df:
-                    continue
-
-                if note[df] and q["Overwrite"] == "Skip":
-                    continue
-
-                def getImages(nid, fld, html, img_width, img_height, img_count, fld_overwrite):
-                    soup = BeautifulSoup(html, "html.parser")
-                    rg_meta = soup.find_all("div", {"class": "rg_meta"})
-                    metadata = [json.loads(e.text) for e in rg_meta]
-                    results = [d["ou"] for d in metadata]
-
-                    if not results:
-                        regex = re.escape("AF_initDataCallback({")
-                        regex += r'[^<]*?data:[^<]*?' + r'(\[[^<]+\])'
-
-                        for txt in re.findall(regex, html):
-                            data = json.loads(txt)
-
-                            try:
-                                for d in data[31][0][12][2]:
-                                    try:
-                                        results.append(d[1][3][0])
-                                    except Exception as e:
-                                        pass
-                            except Exception as e:
-                                pass
-
-                    cnt = 0
-                    images = []
-                    for url in results:
-                        try:
-                            r = requests.get(url, headers=headers, timeout=15)
-                            r.raise_for_status()
-                            data = r.content
-                            if 'text/html' in r.headers.get('content-type', ''):
-                                continue
-                            if 'image/svg+xml' in r.headers.get('content-type', ''):
-                                continue
-                            url = re.sub(r"\?.*?$", "", url)
-                            path = urllib.parse.unquote(url)
-                            fname = os.path.basename(path)
-                            if not fname:
-                                fname = checksum(data)
-                            im = Image.open(io.BytesIO(data))
-                            if img_width > 0 or img_height > 0:
-                                width, height = im.width, im.height
-                                if img_width > 0:
-                                    width = min(width, img_width)
-                                if img_height > 0:
-                                    height = min(height, img_height)
-                                buf = io.BytesIO()
-                                if getattr(im, 'n_frames', 1) == 1:
-                                    im.thumbnail((width, height))
-                                    im.save(buf, format=im.format, optimize=True)
-                                elif mpv_executable:
-                                    thread_id = threading.get_native_id()
-                                    tmp_path = tmpfile(suffix='.{}'.format(thread_id))
-                                    with open(tmp_path, 'wb') as f:
-                                        f.write(data)
-                                    img_fmt = im.format.lower()
-                                    img_ext = '.' + img_fmt
-                                    img_path = tmpfile(suffix=img_ext)
-                                    cmd = [mpv_executable, tmp_path, "-vf", "lavfi=[scale='min({},iw)':'min({},ih)':force_original_aspect_ratio=decrease:flags=lanczos]".format(img_width, img_height), "-o", img_path]
-                                    with noBundledLibs():
-                                        p = subprocess.Popen(cmd, startupinfo=si, stdin=subprocess.PIPE,
-                                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                            env=env)
-                                    if p.wait() == 0:
-                                        with open(img_path, 'rb') as f:
-                                            buf.write(f.read())
-                                else:
-                                    buf = io.BytesIO(data)
-                                data = buf.getvalue()
-                            images.append((fname, data))
-                            cnt += 1
-                            if cnt == img_count:
-                                break
-                        except requests.exceptions.RequestException:
-                            pass
-                        except UnidentifiedImageError:
-                            pass
-                        except UnicodeError as e:
-                            # UnicodeError: encoding with 'idna' codec failed (UnicodeError: label empty or too long)
-                            # https://bugs.python.org/issue32958
-                            if str(e) != "encoding with 'idna' codec failed (UnicodeError: label empty or too long)":
-                                raise
-                    return (nid, fld, images, fld_overwrite)
-
-                w = re.sub(r'</?(b|i|u|strong|span)(?: [^>]+)>', '', w)
-                w = re.sub(r'\[sound:.*?\]', '', w)
-                if '<' in w:
-                    soup = BeautifulSoup(w, "html.parser")
-                    for s in soup.stripped_strings:
-                        w = s
-                        break
-                    else:
-                        w = re.sub(r'<br ?/?>[\s\S]+$', ' ', w)
-                        w = re.sub(r'<[^>]+>', '', w)
-
-                clozes = re.findall(r'{{c\d+::(.*?)(?::.*?)?}}', w)
-                if clozes:
-                    w = ' '.join(clozes)
-
-                query = q["URL"].replace("{}", w)
-
-                try:
-                    r = requests.get("https://www.google.com/search?tbm=isch&q={}&safe=active".format(query), headers=headers, timeout=15)
-                    r.raise_for_status()
-                    future = executor.submit(getImages, nid, df, r.text, q["Width"], q["Height"], q["Count"], q["Overwrite"])
-                    jobs.append(future)
-                except (requests.exceptions.ReadTimeout, requests.exceptions.ConnectionError) as e:
-                    pass
-
-            done, not_done = concurrent.futures.wait(jobs, timeout=0)
-            for future in done:
-                nid, fld, images, overwrite = future.result()
-                updateField(nid, fld, images, overwrite)
-                processed.add(nid)
-                jobs.remove(future)
-            else:
-                label = "Processed %s notes..." % len(processed)
-                mw.progress.update(label)
-
-        for future in concurrent.futures.as_completed(jobs):
-            nid, fld, images, overwrite = future.result()
-            updateField(nid, fld, images, overwrite)
-            processed.add(nid)
-            label = "Processed %s notes..." % len(processed)
-            mw.progress.update(label)
-
-    browser.model.endReset()
-    mw.requireReset()
-    mw.progress.finish()
-    showInfo(ngettext("Processed %d note.", "Processed %d notes.", len(nids)) % len(nids), parent=browser)
+    mw.taskman.with_progress(
+        label='Processing...!',
+        immediate=True, 
+        task=lambda: updateNotes(browser, mw, nids, sf, sq, config),
+        on_done=lambda dummy: showInfo('Complete!',parent=browser)
+    )
 
 
 def onAddImages(browser):
@@ -358,7 +390,8 @@ def onAddImages(browser):
     if not nids:
         tooltip("No cards selected.")
         return
-    updateNotes(browser, nids)
+    updateNotesUI(browser, nids)
+    # browser.mw.taskman.with_progress(label='Processing...!',immediate=True, task=lambda: updateNotes(browser, nids),on_done=lambda: showInfo('Processed.', parent=browser))
 
 
 def setupMenu(browser):
