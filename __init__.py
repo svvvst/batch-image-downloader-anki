@@ -28,7 +28,7 @@ from distutils.spawn import find_executable
 
 from .designer.main import Ui_Dialog
 
-from aqt.operations import CollectionOp
+# New Libraries
 from aqt.progress import ProgressManager
 from aqt.taskman import TaskManager
 
@@ -215,8 +215,8 @@ def updateNotes(browser, mw, nids, sf, sq, config):
                 # progress.finish()
                 # progress.start(immediate=True,label='Processing notes...',max=len(nids),min=len(processed))
                 # mw.taskman.run_on_main(lambda: progress.update(label='Processing notes...',max=len(nids),value=len(processed)))
-                label = str(len(processed)) + ' of ' + str(len(nids))
-                mw.taskman.run_on_main(lambda:mw.progress.update(label=label))
+                label = 'Processing ' + str(len(processed)) + ' of ' + str(len(nids))
+                mw.taskman.run_on_main(lambda:mw.progress.update(label=label,value=len(processed),max=len(nids)))
                 # label = str(len(processed)) + ' of ' + str(len(nids))
                 # tooltip(label)
 
@@ -227,8 +227,8 @@ def updateNotes(browser, mw, nids, sf, sq, config):
             # progress.finish()
             # progress.start(immediate=True,label='Processing notes...',max=len(nids),min=len(processed))
             # mw.taskman.run_on_main(lambda: progress.update(label='Processing notes...',max=len(nids),value=len(processed)))
-            label = str(len(processed)) + ' of ' + str(len(nids))
-            mw.taskman.run_on_main(lambda:mw.progress.update(label=label))
+            label = 'Processing ' + str(len(processed)) + ' of ' + str(len(nids))
+            mw.taskman.run_on_main(lambda:mw.progress.update(label=label,value=len(processed),max=len(nids)))
             # label = str(len(processed)) + ' of ' + str(len(nids))
             # tooltip(label)
 
