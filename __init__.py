@@ -31,6 +31,7 @@ from .designer.main import Ui_Dialog
 # New Libraries
 from aqt.progress import ProgressManager
 from aqt.taskman import TaskManager
+from aqt import gui_hooks
 
 
 # https://github.com/glutanimate/html-cleaner/blob/master/html_cleaner/main.py#L59
@@ -235,6 +236,7 @@ def updateNotes(browser, mw, nids, sf, sq, config):
     browser.model.endReset()
     mw.requireReset()
     # mw.progress.finish()
+    mw.taskman.run_on_main(lambda:mw.progress.finish())
 
 def updateNotesUI(browser, nids):
     from PIL import Image, ImageSequence, UnidentifiedImageError
@@ -383,7 +385,10 @@ def updateNotesUI(browser, nids):
         label='Processing...!',
         immediate=True, 
         task=lambda: updateNotes(browser, mw, nids, sf, sq, config),
-        on_done=lambda dummy: showInfo('Complete!',parent=browser)
+        on_done=lambda dummy:(
+            showInfo('Complete!',parent=browser),
+            mw.taskman.run_on_main(lambda:mw.progress.finish())
+        )
     )
 
 
